@@ -248,23 +248,6 @@ document.addEventListener("DOMContentLoaded", () => {
         runInference({ example_filename: filename }, true);
     }
 
-    // Precomputed cache for GitHub Pages static hosting
-    let precomputedCache = null;
-
-    async function getPrecomputedData() {
-        if (!precomputedCache) {
-            try {
-                const res = await fetch("static/data/precomputed_predictions.json");
-                if (res.ok) {
-                    precomputedCache = await res.json();
-                }
-            } catch (e) {
-                console.warn("Precomputed cache fetch failed:", e);
-            }
-        }
-        return precomputedCache;
-    }
-
     // ==================== INFERENCE PIPELINE ====================
     async function runInference(payload, isJson) {
         showAnalyzingState();
@@ -274,41 +257,19 @@ document.addEventListener("DOMContentLoaded", () => {
         animateProgress();
 
         try {
-            let data = null;
-            const exName = payload && payload.example_filename;
+            const options = {
+                method: "POST",
+                headers: isJson ? { "Content-Type": "application/json" } : {},
+                body: isJson ? JSON.stringify(payload) : payload
+            };
 
-            // 1. Check if clinical sample is in precomputed cache
-            const cache = await getPrecomputedData();
-            if (exName && cache && cache[exName]) {
-                data = cache[exName];
-            } else {
-                // 2. Try live backend API (if running with server)
-                try {
-                    const options = {
-                        method: "POST",
-                        headers: isJson ? { "Content-Type": "application/json" } : {},
-                        body: isJson ? JSON.stringify(payload) : payload
-                    };
-                    const response = await fetch("/api/predict", options);
-                    if (response.ok) {
-                        data = await response.json();
-                    }
-                } catch (apiErr) {
-                    console.log("No live API backend responding; running client demonstration.");
-                }
-
-                // 3. Static GitHub Pages fallback
-                if (!data) {
-                    if (cache) {
-                        const keys = Object.keys(cache);
-                        data = JSON.parse(JSON.stringify(cache[keys[0]]));
-                        data.clinical_summary = "(PACS Workstation Demonstration Mode) " + data.clinical_summary;
-                    } else {
-                        throw new Error("Diagnostic engine offline.");
-                    }
-                }
+            const response = await fetch("/api/predict", options);
+            if (!response.ok) {
+                const err = await response.json().catch(() => ({}));
+                throw new Error(err.message || "Diagnostic inference failed.");
             }
 
+            const data = await response.json();
             const elapsed = Date.now() - startTime;
             const remaining = Math.max(0, minDuration - elapsed);
 
@@ -373,7 +334,9 @@ document.addEventListener("DOMContentLoaded", () => {
         verdictPill.textContent = data.prediction;
         confidencePill.textContent = `${data.confidence} Certainty (${data.top_probability}%)`;
 
-        if (data.prediction === "Dominant Follicle") {
+        if (data.status_code === "ovary_absent" || (data.prediction && data.prediction.includes("Ovary Not in View"))) {
+            verdictHeadline.textContent = "Ovary Not in View (Rescan Required)";
+        } else if (data.prediction === "Dominant Follicle") {
             verdictHeadline.textContent = "Dominant Follicle (DF) Detected";
         } else if (data.prediction === "PCOS") {
             verdictHeadline.textContent = "PCOS-Associated Morphology";
@@ -500,10 +463,8 @@ document.addEventListener("DOMContentLoaded", () => {
         });
 
         const exp = currentExplanations[mode];
-        let targetUrl = exp.url || "";
-        if (targetUrl.startsWith("/")) targetUrl = targetUrl.slice(1);
-        gradcamImg.src = `${targetUrl}?t=${Date.now()}`;
-        btnDownloadGradcam.href = targetUrl;
+        gradcamImg.src = `${exp.url}?t=${Date.now()}`;
+        btnDownloadGradcam.href = exp.url;
         btnDownloadGradcam.download = `pcos_${mode}_view.png`;
 
         const cfg = MODE_CONFIG[mode] || { showColorbar: true, showAnno: true };
